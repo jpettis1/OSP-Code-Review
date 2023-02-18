@@ -95,7 +95,7 @@ function handleRequest(request, options) {
   const _end = request.end;
   let requestBody;
 
-  const concatBody = (chunk) => {
+  const concatBody = chunk => {
     // Assume the writer will be consistent such that we wouldn't get Buffers in
     // some writes and strings in others.
     if (typeof chunk === "string") {
@@ -151,7 +151,7 @@ function handleRequest(request, options) {
 
   let removeSocketListeners;
 
-  request.on("socket", (socket) => {
+  request.on("socket", socket => {
     entry._timestamps.socket = process.hrtime();
 
     const onLookup = () => {
@@ -182,7 +182,7 @@ function handleRequest(request, options) {
     removeSocketListeners();
   });
 
-  request.on("response", (response) => {
+  request.on("response", response => {
     entry._timestamps.firstByte = process.hrtime();
     harEntryMap.set(requestId, entry);
 
@@ -223,7 +223,7 @@ function handleRequest(request, options) {
 
     if (compressed) {
       entry._compressed = true;
-      response.on("data", (chunk) => {
+      response.on("data", chunk => {
         if (entry.response.bodySize === -1) {
           entry.response.bodySize = 0;
         }
@@ -251,11 +251,11 @@ function buildHeaders(headers) {
       });
     }
   } else {
-    Object.keys(headers).forEach((name) => {
+    Object.keys(headers).forEach(name => {
       const values = Array.isArray(headers[name])
         ? headers[name]
         : [headers[name]];
-      values.forEach((value) => {
+      values.forEach(value => {
         list.push({ name, value });
       });
     });
@@ -267,7 +267,7 @@ function buildRequestCookies(headers) {
   const cookies = [];
   for (const header in headers) {
     if (header.toLowerCase() === "cookie") {
-      headers[header].forEach((headerValue) => {
+      headers[header].forEach(headerValue => {
         const parsed = cookie.parse(headerValue);
         for (const name in parsed) {
           const value = parsed[name];
@@ -285,7 +285,7 @@ function buildParams(paramString) {
   for (const name in parsed) {
     const value = parsed[name];
     if (Array.isArray(value)) {
-      value.forEach((item) => {
+      value.forEach(item => {
         params.push({ name, value: item });
       });
     } else {
@@ -299,14 +299,14 @@ function buildResponseCookies(headers) {
   const cookies = [];
   const setCookies = headers["set-cookie"];
   if (setCookies) {
-    setCookies.forEach((headerValue) => {
+    setCookies.forEach(headerValue => {
       let parsed;
       try {
         parsed = setCookie.parse(headerValue);
       } catch (err) {
         return;
       }
-      parsed.forEach((cookie) => {
+      parsed.forEach(cookie => {
         const { name, value, path, domain, expires, httpOnly, secure } = cookie;
         const harCookie = {
           name,
@@ -402,9 +402,12 @@ function addHeaders(oldHeaders, newHeaders) {
 }
 
 function getAgent(input, options) {
+  // input is URL endpoint
+  // if want to use an Agent for a request, you need to pass agent in as an option
   if (options.agent) {
     if (typeof options.agent === "function") {
       return function (...args) {
+        // call changes the context of 'this' when invoking agent
         const agent = options.agent.call(this, ...args);
         if (agent) {
           instrumentAgentInstance(agent);
@@ -474,6 +477,8 @@ function withHar(baseFetch, defaults = {}) {
 
     // Assigning headers and current options object values to options
     options = Object.assign({}, options, {
+      // { "x-har-request-id" : requestId } <-- with square brackets
+      // { "headerName" : requestId } <-- without square brackets
       headers: addHeaders(options.headers, { [headerName]: requestId }),
       // node-fetch 2.x supports a function here, but 1.x does not. So parse
       // the URL and implement protocol-switching ourselves.
@@ -482,7 +487,7 @@ function withHar(baseFetch, defaults = {}) {
     });
 
     return baseFetch(input, options).then(
-      async (response) => {
+      async response => {
         const entry = harEntryMap.get(requestId);
         harEntryMap.delete(requestId);
 
@@ -538,7 +543,7 @@ function withHar(baseFetch, defaults = {}) {
 
         // Allow grouping by pages.
         entry.pageref = harPageRef || "page_1";
-        parents.forEach((parent) => {
+        parents.forEach(parent => {
           parent.pageref = entry.pageref;
         });
         // Response content info.
@@ -592,7 +597,7 @@ function withHar(baseFetch, defaults = {}) {
         }
 
         if (onHarEntry) {
-          parents.forEach((parent) => {
+          parents.forEach(parent => {
             onHarEntry(parent);
           });
           onHarEntry(entry);
@@ -600,7 +605,7 @@ function withHar(baseFetch, defaults = {}) {
 
         return responseCopy;
       },
-      (err) => {
+      err => {
         harEntryMap.delete(requestId);
         throw err;
       }
@@ -636,6 +641,22 @@ function createHarLog(entries = [], pageInfo = {}) {
     },
   };
 }
+
+const newFetch = withHar(fetch);
+const data = {
+  Annie: "I'm ok",
+};
+const fetchData = async () => {
+  await newFetch("https://example.com/profile", {
+    method: "POST", // or 'PUT'
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(data),
+  });
+};
+
+fetchData();
 
 exports.withHar = withHar;
 exports.createHarLog = createHarLog;
