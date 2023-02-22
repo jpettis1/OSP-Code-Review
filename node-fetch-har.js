@@ -13,6 +13,8 @@ const cookie = require("cookie");
 // returns an array of cookies - values depend on set cookie header
 const setCookie = require("set-cookie-parser");
 // name and version from package json - not sure what they is used for yet
+const fetch = require("node-fetch");
+
 const {
   name: packageName,
   version: packageVersion,
@@ -29,10 +31,14 @@ function getDuration(a, b) {
 }
 
 function handleRequest(request, options) {
+  // checking for options obj passed into the invocation of addRequest as (...args)
+  // includes information, such as headers, host, method, protocol, port, etc.
+  // if this data is not avaliable, return
   if (!options || typeof options !== "object") {
     return;
   }
-
+  // headers now set to {} containing various props including x-har-request-id:(1)["ZQqNkmxNPNYQwv1P5SCRs"];
+  // or empty obj
   const headers = options.headers || {};
   const requestId = headers[headerName] ? headers[headerName][0] : null;
 
@@ -42,7 +48,7 @@ function handleRequest(request, options) {
 
   // Redirects! Fetch follows them (in `follow`) mode and uses the same request
   // headers. So we'll see multiple requests with the same ID. We should remove
-  // any previous entry from `harEntryMap` and attach it has a "parent" to this
+  // any previous entry from `harEntryMap` and attach it as a "parent" to this
   // one.
   const parentEntry = harEntryMap.get(requestId);
   if (parentEntry) {
@@ -50,20 +56,28 @@ function handleRequest(request, options) {
   }
 
   const now = Date.now();
+  // The process.hrtime() method to measure code execution time which
+  //returns array which include current high-resolution real time in a [seconds, nanoseconds].
   const startTime = process.hrtime();
   const url = new URL(options.url || options.href); // Depends on Node version?
 
+  // creating new entry obj
   const entry = {
+    // parent entry - will be null for the first request,
+    // subsequent requests will recieved the val in harEntryMap
     _parent: parentEntry,
     _timestamps: {
       start: startTime,
     },
     _resourceType: "fetch",
+    // Date and time stamp of the request start
     startedDateTime: new Date(now).toISOString(),
+    // info about cache usage
     cache: {
       beforeRequest: null,
       afterRequest: null,
     },
+    // Detailed timing info about request/response round trip.
     timings: {
       blocked: -1,
       dns: -1,
@@ -118,14 +132,16 @@ function handleRequest(request, options) {
     return _write.call(this, ...args);
   };
 
+  // on emit end of request populate postData on request obj within entry
   request.end = function (...args) {
     concatBody(...args);
 
     if (requestBody != null) {
       // Works for both buffers and strings.
       entry.request.bodySize = Buffer.byteLength(requestBody);
-
+      // media type / content type
       let mimeType;
+      // getting the media type from headers
       for (const name in headers) {
         if (name.toLowerCase() === "content-type") {
           mimeType = headers[name][0];
@@ -137,10 +153,13 @@ function handleRequest(request, options) {
         const bodyString = requestBody.toString(); // FIXME: Assumes encoding?
         if (mimeType === "application/x-www-form-urlencoded") {
           entry.request.postData = {
+            // mimeType [string] - Mime type of posted data.
             mimeType,
+            // params [array] - List of posted parameters (in case of URL encoded parameters).
             params: buildParams(bodyString),
           };
         } else {
+          // text [string] - Plain text posted data
           entry.request.postData = { mimeType, text: bodyString };
         }
       }
@@ -341,12 +360,17 @@ function instrumentAgentInstance(agent) {
   if (!originalAddRequest.isHarEnabled) {
     agent.addRequest = function addRequest(request, ...args) {
       handleRequest(request, ...args);
+      // I believe that this is calling the addRequest on the agent's prototype
+      // with this pointing to agent
       return originalAddRequest.call(this, request, ...args);
     };
     agent.addRequest.isHarEnabled = true;
   }
 }
 
+// creating custom agent class by adding custom addRequest
+// method to the prototype, which implements request handler
+// and then passes off the request to the original prototype method Agent.addRequest
 function createAgentClass(BaseAgent) {
   class HarAgent extends BaseAgent {
     constructor(...args) {
@@ -356,8 +380,15 @@ function createAgentClass(BaseAgent) {
 
     // This method is undocumented in the Node.js Agent docs. But every custom
     // agent implementation out there uses it, so...
+    // this serves as a wrapper so that request handlers can be added first within
+    // handleRequest before establishing a connection
     addRequest(request, ...args) {
+      // This function adds event listners to the request object to capture data
+      // and add to entry, without this the reponse is entirely discarded
+      // To read further see Node docs - https://nodejs.org/api/http.html#class-httpclientrequest
       handleRequest(request, ...args);
+      // This method is where the connection is initiated and sockets are either
+      // reused, created, or added to the queue - https://github.com/nodejs/node/blob/main/lib/_http_agent.js
       return super.addRequest(request, ...args);
     }
   }
@@ -401,12 +432,25 @@ function addHeaders(oldHeaders, newHeaders) {
   }
 }
 
+//#3)
 function getAgent(input, options) {
+  // input is URL endpoint
+  // if agent is passed in as an option to modifiedFetch, as opposed to using default
+  // (e.g. modifiedFetch("url", { agent: new http.agent() }))
+  // custom global agent
   if (options.agent) {
+    // if we pass http.agent as a value to key agent within the options obj for fetch
+    // (e.g. modifiedFetch("url", { agent: http.Agent }))
     if (typeof options.agent === "function") {
+      // ??? args is the "options" in "agent: getAgent(input, options)"???
       return function (...args) {
+        // call changes the context of 'this' when invoking agent
         const agent = options.agent.call(this, ...args);
         if (agent) {
+          // Instrumenting an existing agent instance (e.g. if agent was passed into options upon
+          // invocation of fetch) - instrumentation usually means adding some performance measurement
+          // tools to the code - in this case we are adding an identifier via isHarEnabled prop to identify
+          // that HAR log functionality is enabled for this particular fetch / agent
           instrumentAgentInstance(agent);
           return agent;
         }
@@ -416,9 +460,14 @@ function getAgent(input, options) {
     instrumentAgentInstance(options.agent);
     return options.agent;
   }
+  // getting custom global Agent instance
   return getGlobalAgent(input);
 }
 
+// This function checks to see if a global agent has already been created,
+// else it creates one
+// By default, http.request() uses a global agent with default params set
+// If you want to customize params you have to create an instance and pass as options
 function getGlobalAgent(input) {
   const url = getInputUrl(input);
   if (url.protocol === "http:") {
@@ -455,8 +504,6 @@ function withHar(baseFetch, defaults = {}) {
       return baseFetch(input, options);
     }
 
-    // COME BACK TO THIS!!!
-
     // Ideally we could just attach the generated entry data to the request
     // directly, like via a header. An ideal place would be in a header, but the
     // headers are already processed by the time the response is finished, so we
@@ -471,13 +518,15 @@ function withHar(baseFetch, defaults = {}) {
     // as a key.
     // Id generated for each request - key for the entry within harEntryMap
     const requestId = generateId();
-
+    // const requestId = "fake_requestId";
     // Assigning headers and current options object values to options
     options = Object.assign({}, options, {
+      // { "x-har-request-id" : requestId } <-- with square brackets
+      // { "headerName" : requestId } <-- without square brackets
       headers: addHeaders(options.headers, { [headerName]: requestId }),
       // node-fetch 2.x supports a function here, but 1.x does not. So parse
       // the URL and implement protocol-switching ourselves.
-      //
+      // get custom agent class to pass into baseFetch to handle request
       agent: getAgent(input, options),
     });
 
@@ -637,5 +686,25 @@ function createHarLog(entries = [], pageInfo = {}) {
   };
 }
 
-exports.withHar = withHar;
-exports.createHarLog = createHarLog;
+const newFetch = withHar(fetch);
+const data = {
+  Annie: "I'm ok",
+};
+const data2 = {
+  Annie2: "I'm ok2",
+};
+const fetchData = async () => {
+  await newFetch("https://curriculum-api.codesmith.io/messages");
+  // await newFetch("https://example.com/profile2", {
+  //   method: "POST", // or 'PUT'
+  //   headers: {
+  //     "Content-Type": "application/json",
+  //   },
+  //   body: JSON.stringify(data2),
+  //   agent: http.Agent,
+  // });
+};
+fetchData();
+
+// exports.withHar = withHar;
+// exports.createHarLog = createHarLog;
